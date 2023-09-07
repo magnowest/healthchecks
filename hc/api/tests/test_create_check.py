@@ -80,6 +80,19 @@ class CreateCheckTestCase(BaseTestCase):
         self.assertEqual(check.grace.total_seconds(), 60)
         self.assertEqual(check.project, self.project)
 
+    def test_it_rejects_null_values(self) -> None:
+        for field in [
+            "channels",
+            "timeout",
+            "grace",
+            "name",
+            "schedule",
+            "subject",
+            "subject_fail",
+            "unique",
+        ]:
+            self.post({field: None}, expect_fragment=f"{field} is not a")
+
     def test_it_handles_options(self) -> None:
         r = self.client.options(self.URL)
         self.assertEqual(r.status_code, 204)
@@ -160,6 +173,9 @@ class CreateCheckTestCase(BaseTestCase):
         # The check should not have been saved
         self.assertFalse(Check.objects.exists())
 
+    def test_it_rejects_non_string_channels_key(self) -> None:
+        r = self.post({"channels": 123}, expect_fragment="channels is not a string")
+
     def test_it_supports_unique_name(self) -> None:
         check = Check.objects.create(project=self.project, name="Foo")
 
@@ -173,6 +189,12 @@ class CreateCheckTestCase(BaseTestCase):
         # The tags field should have a value now:
         check.refresh_from_db()
         self.assertEqual(check.tags, "bar")
+
+    def test_it_creates_new_check_if_unique_references_absent_field(self) -> None:
+        Check.objects.create(project=self.project)
+        for s in ["name", "slug", "tags", "timeout", "grace"]:
+            r = self.post({"unique": [s]})
+            self.assertEqual(r.status_code, 201)
 
     def test_it_supports_unique_slug(self) -> None:
         check = Check.objects.create(project=self.project, slug="foo")
@@ -241,6 +263,12 @@ class CreateCheckTestCase(BaseTestCase):
         self.assertEqual(r.status_code, 400)
         self.assertEqual(r.json()["error"], "could not parse request body")
 
+    def test_it_handles_non_dict_json(self) -> None:
+        r = self.client.post(self.URL, "[1,2,3]", content_type="application/json")
+        self.assertEqual(r.status_code, 400)
+        msg = r.json()["error"]
+        self.assertEqual(msg, "json validation error: value is not an object")
+
     def test_it_rejects_wrong_api_key(self) -> None:
         r = self.post({"api_key": "Y" * 32})
         self.assertEqual(r.status_code, 401)
@@ -263,7 +291,7 @@ class CreateCheckTestCase(BaseTestCase):
     def test_unique_accepts_only_specific_values(self) -> None:
         self.post(
             {"name": "Foo", "unique": ["status"]},
-            expect_fragment="unexpected value",
+            expect_fragment="an item in 'unique' has unexpected value",
         )
 
     def test_it_rejects_bad_unique_values(self) -> None:
@@ -284,11 +312,25 @@ class CreateCheckTestCase(BaseTestCase):
         self.assertTrue("timeout" not in doc)
 
     def test_it_validates_cron_expression(self) -> None:
-        r = self.post({"schedule": "bad-expression", "tz": "Europe/Riga", "grace": 60})
+        r = self.post(
+            {"schedule": "bad-expression", "tz": "Europe/Riga", "grace": 60},
+            expect_fragment="schedule is not a valid cron expression",
+        )
+        self.assertEqual(r.status_code, 400)
+
+    def test_it_rejects_long_cron_expression(self) -> None:
+        s = "1," * 100 + "1 * * * *"
+        r = self.post(
+            {"schedule": s, "tz": "Europe/Riga", "grace": 60},
+            expect_fragment="schedule is too long",
+        )
         self.assertEqual(r.status_code, 400)
 
     def test_it_validates_timezone(self) -> None:
-        r = self.post({"schedule": "* * * * *", "tz": "not-a-timezone", "grace": 60})
+        r = self.post(
+            {"schedule": "* * * * *", "tz": "not-a-timezone", "grace": 60},
+            expect_fragment="tz is not a valid timezone",
+        )
         self.assertEqual(r.status_code, 400)
 
     def test_it_sets_default_timeout(self) -> None:
@@ -320,8 +362,15 @@ class CreateCheckTestCase(BaseTestCase):
         self.assertTrue(check.manual_resume)
 
     def test_it_rejects_non_boolean_manual_resume(self) -> None:
-        r = self.post({"manual_resume": "surprise"})
+        r = self.post(
+            {"manual_resume": "surprise"},
+            expect_fragment="manual_resume is not a boolean",
+        )
         self.assertEqual(r.status_code, 400)
+
+    def test_it_rejects_non_boolean_filter_flags(self) -> None:
+        for s in ("filter_subject", "filter_body"):
+            r = self.post({s: "surprise"}, expect_fragment=f"{s} is not a boolean")
 
     def test_it_sets_methods(self) -> None:
         r = self.post({"methods": "POST"})
@@ -331,8 +380,13 @@ class CreateCheckTestCase(BaseTestCase):
         self.assertEqual(check.methods, "POST")
 
     def test_it_rejects_bad_methods_value(self) -> None:
-        r = self.post({"methods": "bad-value"})
-        self.assertEqual(r.status_code, 400)
+        r = self.post(
+            {"methods": "bad-value"}, expect_fragment="methods has unexpected value"
+        )
+
+    def test_it_rejects_long_filtering_keywords(self) -> None:
+        for s in ("subject", "subject_fail", "start_kw", "success_kw", "failure_kw"):
+            r = self.post({s: "A" * 201}, expect_fragment=f"{s} is too long")
 
     def test_it_sets_success_kw(self) -> None:
         r = self.post({"subject": "SUCCESS,COMPLETE"})
